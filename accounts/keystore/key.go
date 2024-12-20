@@ -1,24 +1,6 @@
-// Copyright 2014 The go-ethereum Authors
-// This file is part of the go-ethereum library.
-//
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// The go-ethereum library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
-
 package keystore
 
 import (
-	"bytes"
-	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -31,7 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/cryptod"
 	"github.com/google/uuid"
 )
 
@@ -40,12 +22,25 @@ const (
 )
 
 type Key struct {
-	Id uuid.UUID // Version 4 "random" for unique id not derived from key data
-	// to simplify lookups we also store the address
+	Id uuid.UUID // Unique ID for the key
+	// Address derived from the public key
 	Address common.Address
-	// we only store privkey as pubkey/address can be derived from it
-	// privkey in this struct is always in plaintext
-	PrivateKey *ecdsa.PrivateKey
+	// Private key stored in plaintext
+	PrivateKey *cryptod.PrivateKey
+}
+
+// type Key struct {
+// 	Id            uuid.UUID        `json:"id"`
+// 	Address       common.Address   `json:"address"`
+// 	PrivateKey    *cryptod.PrivateKey `json:"-"`             // Excluded from JSON
+// 	PrivateKeyRaw []byte           `json:"privatekeyraw"`    // Serialized private key bytes
+// }
+
+type plainKeyJSON struct {
+	Address    string `json:"address"`
+	PrivateKey string `json:"privatekey"`
+	Id         string `json:"id"`
+	Version    int    `json:"version"`
 }
 
 type keyStore interface {
@@ -55,13 +50,6 @@ type keyStore interface {
 	StoreKey(filename string, k *Key, auth string) error
 	// Joins filename with the key directory unless it is already absolute.
 	JoinPath(filename string) string
-}
-
-type plainKeyJSON struct {
-	Address    string `json:"address"`
-	PrivateKey string `json:"privatekey"`
-	Id         string `json:"id"`
-	Version    int    `json:"version"`
 }
 
 type encryptedKeyJSONV3 struct {
@@ -94,7 +82,7 @@ type cipherparamsJSON struct {
 func (k *Key) MarshalJSON() (j []byte, err error) {
 	jStruct := plainKeyJSON{
 		hex.EncodeToString(k.Address[:]),
-		hex.EncodeToString(crypto.FromECDSA(k.PrivateKey)),
+		hex.EncodeToString(cryptod.FromMLDsa87(k.PrivateKey)),
 		k.Id.String(),
 		version,
 	}
@@ -104,7 +92,7 @@ func (k *Key) MarshalJSON() (j []byte, err error) {
 
 func (k *Key) UnmarshalJSON(j []byte) (err error) {
 	keyJSON := new(plainKeyJSON)
-	err = json.Unmarshal(j, &keyJSON)
+	err = json.Unmarshal(j, keyJSON)
 	if err != nil {
 		return err
 	}
@@ -119,7 +107,7 @@ func (k *Key) UnmarshalJSON(j []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	privkey, err := crypto.HexToECDSA(keyJSON.PrivateKey)
+	privkey, err := cryptod.HexToMLDsa87(keyJSON.PrivateKey)
 	if err != nil {
 		return err
 	}
@@ -130,46 +118,79 @@ func (k *Key) UnmarshalJSON(j []byte) (err error) {
 	return nil
 }
 
-func newKeyFromECDSA(privateKeyECDSA *ecdsa.PrivateKey) *Key {
+// NewKeyForDirectICAP generates a key whose address fits into <155 bits to fit
+// the Direct ICAP spec. For simplicity and easier compatibility with other libs,
+// we retry until the first byte is 0.
+func NewKeyForDirectICAP(rand io.Reader) *Key {
+	// Generate random key
+	privateKey, err := cryptod.GenerateMLDsa87Key()
+	if err != nil {
+		panic("key generation: could not generate MLDsa87 key: " + err.Error())
+	}
+
+	// Type assert the public key to mldsa87.PublicKey
+	pubKey, ok := privateKey.Public().(cryptod.PublicKey)
+	if !ok {
+		panic("key generation: failed to assert public key to mldsa87.PublicKey")
+	}
+
+	// Generate address from public key
+	address := cryptod.PubkeyToAddress(pubKey)
+
+	// Check if the address satisfies the Direct ICAP condition
+	if !strings.HasPrefix(address.Hex(), "0x00") {
+		return NewKeyForDirectICAP(rand) // Retry if condition not met
+	}
+
+	// Wrap the key into the Key struct
+	return &Key{
+		Id:         uuid.Must(uuid.NewRandom()), // Generate unique ID
+		Address:    address,
+		PrivateKey: privateKey,
+	}
+}
+
+func newKeyFromMLDsa87(privateKey *cryptod.PrivateKey) *Key {
 	id, err := uuid.NewRandom()
 	if err != nil {
 		panic(fmt.Sprintf("Could not create random uuid: %v", err))
 	}
+
+	// Type assert the public key to cryptod.PublicKey
+	pubKey, ok := privateKey.Public().(cryptod.PublicKey)
+	if !ok {
+		panic("key generation: failed to assert public key to cryptod.PublicKey")
+	}
+
+	// Generate address from the asserted public key
 	key := &Key{
 		Id:         id,
-		Address:    crypto.PubkeyToAddress(privateKeyECDSA.PublicKey),
-		PrivateKey: privateKeyECDSA,
+		Address:    cryptod.PubkeyToAddress(pubKey),
+		PrivateKey: privateKey,
 	}
 	return key
 }
 
-// NewKeyForDirectICAP generates a key whose address fits into < 155 bits so it can fit
-// into the Direct ICAP spec. for simplicity and easier compatibility with other libs, we
-// retry until the first byte is 0.
-func NewKeyForDirectICAP(rand io.Reader) *Key {
-	randBytes := make([]byte, 64)
-	_, err := rand.Read(randBytes)
+/* func newKeyFromMLDsa87_(privateKey *cryptod.PrivateKey) *Key {
+	id, err := uuid.NewRandom()
 	if err != nil {
-		panic("key generation: could not read from random source: " + err.Error())
+		panic(fmt.Sprintf("Could not create random uuid: %v", err))
 	}
-	reader := bytes.NewReader(randBytes)
-	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), reader)
-	if err != nil {
-		panic("key generation: ecdsa.GenerateKey failed: " + err.Error())
-	}
-	key := newKeyFromECDSA(privateKeyECDSA)
-	if !strings.HasPrefix(key.Address.Hex(), "0x00") {
-		return NewKeyForDirectICAP(rand)
+	pubKey := privateKey.Public() // Extract public key
+	key := &Key{
+		Id:         id,
+		Address:    cryptod.PubkeyToAddress(*pubKey),
+		PrivateKey: privateKey,
 	}
 	return key
-}
+} */
 
 func newKey(rand io.Reader) (*Key, error) {
-	privateKeyECDSA, err := ecdsa.GenerateKey(crypto.S256(), rand)
+	privateKey, err := cryptod.GenerateMLDsa87Key()
 	if err != nil {
 		return nil, err
 	}
-	return newKeyFromECDSA(privateKeyECDSA), nil
+	return newKeyFromMLDsa87(privateKey), nil
 }
 
 func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Account, error) {
@@ -182,21 +203,16 @@ func storeNewKey(ks keyStore, rand io.Reader, auth string) (*Key, accounts.Accou
 		URL:     accounts.URL{Scheme: KeyStoreScheme, Path: ks.JoinPath(keyFileName(key.Address))},
 	}
 	if err := ks.StoreKey(a.URL.Path, key, auth); err != nil {
-		zeroKey(key.PrivateKey)
 		return nil, a, err
 	}
 	return key, a, err
 }
 
 func writeTemporaryKeyFile(file string, content []byte) (string, error) {
-	// Create the keystore directory with appropriate permissions
-	// in case it is not present yet.
 	const dirPerm = 0700
 	if err := os.MkdirAll(filepath.Dir(file), dirPerm); err != nil {
 		return "", err
 	}
-	// Atomic write: create a temporary hidden file first
-	// then move it into place. TempFile assigns mode 0600.
 	f, err := ioutil.TempFile(filepath.Dir(file), "."+filepath.Base(file)+".tmp")
 	if err != nil {
 		return "", err

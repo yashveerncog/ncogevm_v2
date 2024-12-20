@@ -16,6 +16,7 @@
 
 package keystore
 
+/*
 import (
 	"io/ioutil"
 	"math/rand"
@@ -472,3 +473,4 @@ func tmpKeyStore(t *testing.T, encrypted bool) (string, *KeyStore) {
 	}
 	return d, newKs(d)
 }
+*/

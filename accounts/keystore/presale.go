@@ -26,12 +26,13 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/pbkdf2"
+
+	"github.com/ethereum/go-ethereum/cryptod" // Replace with the correct module path
 )
 
-// creates a Key and stores that in the given KeyStore by decrypting a presale key JSON
+// importPreSaleKey creates a Key and stores it in the given KeyStore by decrypting a presale key JSON.
 func importPreSaleKey(keyStore keyStore, keyJSON []byte, password string) (accounts.Account, *Key, error) {
 	key, err := decryptPreSaleKey(keyJSON, password)
 	if err != nil {
@@ -52,6 +53,7 @@ func importPreSaleKey(keyStore keyStore, keyJSON []byte, password string) (accou
 	return a, key, err
 }
 
+// decryptPreSaleKey decrypts the presale key JSON using the given password.
 func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error) {
 	preSaleKeyStruct := struct {
 		EncSeed string
@@ -63,6 +65,7 @@ func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error
 	if err != nil {
 		return nil, err
 	}
+
 	encSeedBytes, err := hex.DecodeString(preSaleKeyStruct.EncSeed)
 	if err != nil {
 		return nil, errors.New("invalid hex in encSeed")
@@ -72,28 +75,37 @@ func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error
 	}
 	iv := encSeedBytes[:16]
 	cipherText := encSeedBytes[16:]
-	/*
-		See https://github.com/ethereum/pyethsaletool
 
-		pyethsaletool generates the encryption key from password by
-		2000 rounds of PBKDF2 with HMAC-SHA-256 using password as salt (:().
-		16 byte key length within PBKDF2 and resulting key is used as AES key
-	*/
+	// Key derivation using PBKDF2
 	passBytes := []byte(password)
 	derivedKey := pbkdf2.Key(passBytes, passBytes, 2000, 16, sha256.New)
 	plainText, err := aesCBCDecrypt(derivedKey, cipherText, iv)
 	if err != nil {
 		return nil, err
 	}
-	ethPriv := crypto.Keccak256(plainText)
-	ecKey := crypto.ToECDSAUnsafe(ethPriv)
 
+	// Hash the plaintext and generate MLDsa87 private key
+	ethPriv := cryptod.Keccak512(plainText) // Use Keccak512 for hashing
+	privKey, err := cryptod.ToMLDsa87(ethPriv)
+	if err != nil {
+		return nil, errors.New("failed to generate MLDsa87 private key")
+	}
+
+	// Type assert the public key
+	pubKey, ok := privKey.Public().(cryptod.PublicKey)
+	if !ok {
+		return nil, errors.New("failed to assert MLDsa87 public key")
+	}
+
+	// Create the Key structure
 	key = &Key{
 		Id:         uuid.UUID{},
-		Address:    crypto.PubkeyToAddress(ecKey.PublicKey),
-		PrivateKey: ecKey,
+		Address:    cryptod.PubkeyToAddress(pubKey),
+		PrivateKey: privKey,
 	}
-	derivedAddr := hex.EncodeToString(key.Address.Bytes()) // needed because .Hex() gives leading "0x"
+
+	// Validate the address matches the expected address
+	derivedAddr := hex.EncodeToString(key.Address.Bytes()) // Address in hex without "0x"
 	expectedAddr := preSaleKeyStruct.EthAddr
 	if derivedAddr != expectedAddr {
 		err = fmt.Errorf("decrypted addr '%s' not equal to expected addr '%s'", derivedAddr, expectedAddr)
@@ -101,7 +113,8 @@ func decryptPreSaleKey(fileContent []byte, password string) (key *Key, err error
 	return key, err
 }
 
-func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
+// aesCTRXOR performs AES encryption/decryption using CTR mode and XORs the text.
+/* func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
 	// AES-128 is selected due to size of encryptKey.
 	aesBlock, err := aes.NewCipher(key)
 	if err != nil {
@@ -111,8 +124,20 @@ func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
 	outText := make([]byte, len(inText))
 	stream.XORKeyStream(outText, inText)
 	return outText, err
+} */
+
+func aesCTRXOR(key, inText, iv []byte) ([]byte, error) {
+	aesBlock, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	stream := cipher.NewCTR(aesBlock, iv)
+	outText := make([]byte, len(inText))
+	stream.XORKeyStream(outText, inText)
+	return outText, nil
 }
 
+// aesCBCDecrypt decrypts the cipher text using AES-CBC with the given key and IV.
 func aesCBCDecrypt(key, cipherText, iv []byte) ([]byte, error) {
 	aesBlock, err := aes.NewCipher(key)
 	if err != nil {
@@ -128,19 +153,17 @@ func aesCBCDecrypt(key, cipherText, iv []byte) ([]byte, error) {
 	return plaintext, err
 }
 
-// From https://leanpub.com/gocrypto/read#leanpub-auto-block-cipher-modes
+// pkcs7Unpad removes PKCS#7 padding from the decrypted data.
 func pkcs7Unpad(in []byte) []byte {
 	if len(in) == 0 {
 		return nil
 	}
-
 	padding := in[len(in)-1]
 	if int(padding) > len(in) || padding > aes.BlockSize {
 		return nil
 	} else if padding == 0 {
 		return nil
 	}
-
 	for i := len(in) - 1; i > len(in)-int(padding)-1; i-- {
 		if in[i] != padding {
 			return nil

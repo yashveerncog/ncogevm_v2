@@ -25,6 +25,12 @@ const DigestLength = 32
 
 var errInvalidPubkey = errors.New("invalid MLDsa87 public key")
 
+// PrivateKey is an alias for mldsa87.PrivateKey
+type PrivateKey = mldsa87.PrivateKey
+
+// PublicKey is an alias for mldsa87.PublicKey
+type PublicKey = mldsa87.PublicKey
+
 // KeccakState wraps sha3.state
 type KeccakState interface {
 	hash.Hash

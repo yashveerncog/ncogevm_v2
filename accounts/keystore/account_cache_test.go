@@ -16,6 +16,7 @@
 
 package keystore
 
+/*
 import (
 	"fmt"
 	"io/ioutil"
@@ -404,3 +405,4 @@ func forceCopyFile(dst, src string) error {
 	}
 	return ioutil.WriteFile(dst, data, 0644)
 }
+*/

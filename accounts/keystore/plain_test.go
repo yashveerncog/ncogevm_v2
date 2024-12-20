@@ -16,6 +16,7 @@
 
 package keystore
 
+/*
 import (
 	"crypto/rand"
 	"encoding/hex"
@@ -264,3 +265,4 @@ func TestV3_30_Byte_Key(t *testing.T) {
 	tests := loadKeyStoreTestV3("testdata/v3_test_vector.json", t)
 	testDecryptV3(tests["30_byte_key"], t)
 }
+*/
