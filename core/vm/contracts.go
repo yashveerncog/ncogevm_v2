@@ -32,6 +32,7 @@ import (
 
 	//lint:ignore SA1019 Needed for precompile
 	"golang.org/x/crypto/ripemd160"
+	"golang.org/x/crypto/sha3"
 )
 
 // PrecompiledContract is the basic interface for native Go contracts. The implementation
@@ -51,7 +52,8 @@ type PrecompiledStateContract interface {
 var PrecompiledContractsHomestead = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{1}): &ecrecover{},
 	common.BytesToAddress([]byte{2}): &sha256hash{},
-	common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	//common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	common.BytesToAddress([]byte{3}): &shake256hash{},
 	common.BytesToAddress([]byte{4}): &dataCopy{},
 }
 
@@ -60,7 +62,8 @@ var PrecompiledContractsHomestead = map[common.Address]PrecompiledContract{
 var PrecompiledContractsByzantium = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{1}): &ecrecover{},
 	common.BytesToAddress([]byte{2}): &sha256hash{},
-	common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	//common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	common.BytesToAddress([]byte{3}): &shake256hash{},
 	common.BytesToAddress([]byte{4}): &dataCopy{},
 	common.BytesToAddress([]byte{5}): &bigModExp{eip2565: false},
 	common.BytesToAddress([]byte{6}): &bn256AddByzantium{},
@@ -73,7 +76,8 @@ var PrecompiledContractsByzantium = map[common.Address]PrecompiledContract{
 var PrecompiledContractsIstanbul = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{1}): &ecrecover{},
 	common.BytesToAddress([]byte{2}): &sha256hash{},
-	common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	//common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	common.BytesToAddress([]byte{3}): &shake256hash{},
 	common.BytesToAddress([]byte{4}): &dataCopy{},
 	common.BytesToAddress([]byte{5}): &bigModExp{eip2565: false},
 	common.BytesToAddress([]byte{6}): &bn256AddIstanbul{},
@@ -87,7 +91,8 @@ var PrecompiledContractsIstanbul = map[common.Address]PrecompiledContract{
 var PrecompiledContractsBerlin = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{1}): &ecrecover{},
 	common.BytesToAddress([]byte{2}): &sha256hash{},
-	common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	//common.BytesToAddress([]byte{3}): &ripemd160hash{},
+	common.BytesToAddress([]byte{3}): &shake256hash{},
 	common.BytesToAddress([]byte{4}): &dataCopy{},
 	common.BytesToAddress([]byte{5}): &bigModExp{eip2565: true},
 	common.BytesToAddress([]byte{6}): &bn256AddIstanbul{},
@@ -216,6 +221,7 @@ func (c *sha256hash) Run(input []byte) ([]byte, error) {
 
 // RIPEMD160 implemented as a native contract.
 type ripemd160hash struct{}
+type shake256hash struct{}
 
 // RequiredGas returns the gas required to execute the pre-compiled contract.
 //
@@ -224,10 +230,24 @@ type ripemd160hash struct{}
 func (c *ripemd160hash) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.Ripemd160PerWordGas + params.Ripemd160BaseGas
 }
+
+func (c *shake256hash) RequiredGas(input []byte) uint64 {
+	//return uint64(len(input)+31)/32*params.Ripemd160PerWordGas + params.Ripemd160BaseGas
+	return uint64(len(input)+31)/32*params.Sha256PerWordGas + params.Sha256BaseGas
+}
 func (c *ripemd160hash) Run(input []byte) ([]byte, error) {
 	ripemd := ripemd160.New()
 	ripemd.Write(input)
 	return common.LeftPadBytes(ripemd.Sum(nil), 32), nil
+}
+
+// Run executes SHAKE256 on the input and returns a 160-bit hash padded to 32 bytes.
+func (c *shake256hash) Run(input []byte) ([]byte, error) {
+	hasher := sha3.NewShake256()
+	hasher.Write(input)
+	output := make([]byte, 20) // SHAKE256 output truncated to 160 bits (20 bytes)
+	hasher.Read(output)
+	return common.LeftPadBytes(output, 32), nil
 }
 
 // data copy implemented as a native contract.
@@ -270,9 +290,10 @@ var (
 // modexpMultComplexity implements bigModexp multComplexity formula, as defined in EIP-198
 //
 // def mult_complexity(x):
-//    if x <= 64: return x ** 2
-//    elif x <= 1024: return x ** 2 // 4 + 96 * x - 3072
-//    else: return x ** 2 // 16 + 480 * x - 199680
+//
+//	if x <= 64: return x ** 2
+//	elif x <= 1024: return x ** 2 // 4 + 96 * x - 3072
+//	else: return x ** 2 // 16 + 480 * x - 199680
 //
 // where is x is max(length_of_MODULUS, length_of_BASE)
 func modexpMultComplexity(x *big.Int) *big.Int {

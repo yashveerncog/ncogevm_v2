@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"golang.org/x/crypto/sha3"
 )
 
 // precompiledTest defines the input/output pairs for precompiled contract tests.
@@ -46,9 +47,10 @@ type precompiledFailureTest struct {
 // allPrecompiles does not map to the actual set of precompiles, as it also contains
 // repriced versions of precompiles at certain slots
 var allPrecompiles = map[common.Address]PrecompiledContract{
-	common.BytesToAddress([]byte{1}):    &ecrecover{},
-	common.BytesToAddress([]byte{2}):    &sha256hash{},
-	common.BytesToAddress([]byte{3}):    &ripemd160hash{},
+	common.BytesToAddress([]byte{1}): &ecrecover{},
+	common.BytesToAddress([]byte{2}): &sha256hash{},
+	//common.BytesToAddress([]byte{3}):    &ripemd160hash{},
+	common.BytesToAddress([]byte{3}):    &shake256hash{},
 	common.BytesToAddress([]byte{4}):    &dataCopy{},
 	common.BytesToAddress([]byte{5}):    &bigModExp{eip2565: false},
 	common.BytesToAddress([]byte{0xf5}): &bigModExp{eip2565: true},
@@ -390,4 +392,21 @@ func BenchmarkPrecompiledBLS12381G2MultiExpWorstCase(b *testing.B) {
 		NoBenchmark: false,
 	}
 	benchmarkPrecompiled("0f", testcase, b)
+}
+
+func TestShake256Hash(t *testing.T) {
+	input := []byte("hello world")
+	expectedHash := make([]byte, 32)
+	shake := sha3.NewShake256()
+	shake.Write(input)
+	shake.Read(expectedHash)
+
+	contract := &shake256hash{}
+	output, err := contract.Run(input)
+	if err != nil {
+		t.Fatalf("SHAKE256 execution failed: %v", err)
+	}
+	if !bytes.Equal(output, expectedHash) {
+		t.Errorf("SHAKE256 output mismatch, got %x, want %x", output, expectedHash)
+	}
 }
