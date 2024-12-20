@@ -123,8 +123,11 @@ const (
 	Sha256PerWordGas    uint64 = 12   // Per-word price for a SHA256 operation
 	Ripemd160BaseGas    uint64 = 600  // Base price for a RIPEMD160 operation
 	Ripemd160PerWordGas uint64 = 120  // Per-word price for a RIPEMD160 operation
-	IdentityBaseGas     uint64 = 15   // Base price for a data copy operation
-	IdentityPerWordGas  uint64 = 3    // Per-work price for a data copy operation
+	Shake256BaseGas            = 30   // Base cost
+	Shake256PerWordGas         = 6
+
+	IdentityBaseGas    uint64 = 15 // Base price for a data copy operation
+	IdentityPerWordGas uint64 = 3  // Per-work price for a data copy operation
 
 	Bn256AddGasByzantium             uint64 = 500    // Byzantium gas needed for an elliptic curve addition
 	Bn256AddGasIstanbul              uint64 = 150    // Gas needed for an elliptic curve addition
