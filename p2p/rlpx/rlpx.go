@@ -277,7 +277,7 @@ func updateMAC(mac hash.Hash, block cipher.Block, seed []byte) []byte {
 // }
 
 // update the Handshake with kyber change the *ecdsa.PrivateKey to *mldsa87.PrivateKey
-func (c *Conn) Handshake(prv *mldsa87.PrivateKey) (*kyber768.PublicKey, error) {
+func (c *Conn) Handshake(prv *mldsa87.PrivateKey) (*mldsa87.PublicKey, error) {
 	var sec Secrets
 	var err error
 
@@ -291,7 +291,7 @@ func (c *Conn) Handshake(prv *mldsa87.PrivateKey) (*kyber768.PublicKey, error) {
 		return nil, err
 	}
 	c.InitWithSecrets(sec)
-	return &sec.remote, nil
+	return sec.remote, nil
 }
 
 // InitWithSecrets injects connection secrets as if a handshake had
