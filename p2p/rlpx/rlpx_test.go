@@ -18,7 +18,7 @@ package rlpx
 
 import (
 	"bytes"
-	"crypto/ecdsa"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -30,6 +30,8 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/ecies"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/assert"
 )
@@ -86,14 +88,17 @@ func checkMsgReadWrite(t *testing.T, p1, p2 *Conn, msgCode uint64, msgData []byt
 func createPeers(t *testing.T) (peer1, peer2 *Conn) {
 	conn1, conn2 := net.Pipe()
 	key1, key2 := newkey(), newkey()
-	peer1 = NewConn(conn1, &key2.PublicKey) // dialer
-	peer2 = NewConn(conn2, nil)             // listener
+	// Derive public keys explicitly for mldsa87
+	pubKey2 := key2.Public().(*mldsa87.PublicKey)
+
+	peer1 = NewConn(conn1, pubKey2) // dialer
+	peer2 = NewConn(conn2, nil)     // listener
 	doHandshake(t, peer1, peer2, key1, key2)
 	return peer1, peer2
 }
 
-func doHandshake(t *testing.T, peer1, peer2 *Conn, key1, key2 *ecdsa.PrivateKey) {
-	keyChan := make(chan *ecdsa.PublicKey, 1)
+func doHandshake(t *testing.T, peer1, peer2 *Conn, key1, key2 *mldsa87.PrivateKey) {
+	keyChan := make(chan *mldsa87.PublicKey, 1)
 	go func() {
 		pubKey, err := peer2.Handshake(key2)
 		if err != nil {
@@ -109,7 +114,7 @@ func doHandshake(t *testing.T, peer1, peer2 *Conn, key1, key2 *ecdsa.PrivateKey)
 	pubKey1 := <-keyChan
 
 	// Confirm the handshake was successful.
-	if !reflect.DeepEqual(pubKey1, &key1.PublicKey) || !reflect.DeepEqual(pubKey2, &key2.PublicKey) {
+	if !reflect.DeepEqual(pubKey1, key1.Public().(*mldsa87.PublicKey)) || !reflect.DeepEqual(pubKey2, key2.Public().(*mldsa87.PublicKey)) {
 		t.Fatal("unsuccessful handshake")
 	}
 }
@@ -397,10 +402,20 @@ func unhex(str string) []byte {
 	return b
 }
 
-func newkey() *ecdsa.PrivateKey {
-	key, err := crypto.GenerateKey()
+// func newkey() *ecdsa.PrivateKey {
+// 	key, err := crypto.GenerateKey()
+// 	if err != nil {
+// 		panic("couldn't generate key: " + err.Error())
+// 	}
+// 	return key
+// }
+
+func newkey() *mldsa87.PrivateKey {
+	//key, err := crypto.GenerateKey()
+	// Step 1: Generate Kyber key pair
+	_, privKey, err := mldsa87.GenerateKey(rand.Reader)
 	if err != nil {
-		panic("couldn't generate key: " + err.Error())
+		panic("couldn't generate ML-DSA87 key: " + err.Error())
 	}
-	return key
+	return privKey
 }
