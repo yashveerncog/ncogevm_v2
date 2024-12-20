@@ -19,12 +19,14 @@ package rlpx
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -34,7 +36,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/cloudflare/circl/kem"
+	"github.com/cloudflare/circl/kem/kyber/kyber768"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"github.com/ethereum/go-ethereum/crypto/ecies"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/golang/snappy"
@@ -48,7 +53,8 @@ import (
 // This type is not generally safe for concurrent use, but reading and writing of messages
 // may happen concurrently after the handshake.
 type Conn struct {
-	dialDest  *ecdsa.PublicKey
+	//dialDest  *ecdsa.PublicKey
+	dialDest  *mldsa87.PublicKey
 	conn      net.Conn
 	handshake *handshakeState
 	snappy    bool
@@ -65,7 +71,7 @@ type handshakeState struct {
 
 // NewConn wraps the given network connection. If dialDest is non-nil, the connection
 // behaves as the initiator during the handshake.
-func NewConn(conn net.Conn, dialDest *ecdsa.PublicKey) *Conn {
+func NewConn(conn net.Conn, dialDest *mldsa87.PublicKey) *Conn {
 	return &Conn{
 		dialDest: dialDest,
 		conn:     conn,
@@ -253,21 +259,39 @@ func updateMAC(mac hash.Hash, block cipher.Block, seed []byte) []byte {
 
 // Handshake performs the handshake. This must be called before any data is written
 // or read from the connection.
-func (c *Conn) Handshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
-	var (
-		sec Secrets
-		err error
-	)
+// func (c *Conn) Handshake(prv *ecdsa.PrivateKey) (*ecdsa.PublicKey, error) {
+// 	var (
+// 		sec Secrets
+// 		err error
+// 	)
+// 	if c.dialDest != nil {
+// 		sec, err = initiatorEncHandshake(c.conn, prv, c.dialDest)
+// 	} else {
+// 		sec, err = receiverEncHandshake(c.conn, prv)
+// 	}
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	c.InitWithSecrets(sec)
+// 	return sec.remote, err
+// }
+
+// update the Handshake with kyber change the *ecdsa.PrivateKey to *mldsa87.PrivateKey
+func (c *Conn) Handshake(prv *mldsa87.PrivateKey) (*kyber768.PublicKey, error) {
+	var sec Secrets
+	var err error
+
 	if c.dialDest != nil {
 		sec, err = initiatorEncHandshake(c.conn, prv, c.dialDest)
 	} else {
 		sec, err = receiverEncHandshake(c.conn, prv)
 	}
+
 	if err != nil {
 		return nil, err
 	}
 	c.InitWithSecrets(sec)
-	return sec.remote, err
+	return &sec.remote, nil
 }
 
 // InitWithSecrets injects connection secrets as if a handshake had
@@ -335,16 +359,38 @@ var (
 type Secrets struct {
 	AES, MAC              []byte
 	EgressMAC, IngressMAC hash.Hash
-	remote                *ecdsa.PublicKey
+	remote                *mldsa87.PublicKey
 }
 
 // encHandshake contains the state of the encryption handshake.
+//
+//	type encHandshake struct {
+//		initiator            bool
+//		remote               *ecies.PublicKey  // remote-pubk
+//		initNonce, respNonce []byte            // nonce
+//		randomPrivKey        *ecies.PrivateKey // ecdhe-random
+//		remoteRandomPub      *ecies.PublicKey  // ecdhe-random-pubk
+//	}
 type encHandshake struct {
+	initiator       bool
+	remote          *ecies.PublicKey
+	initNonce       []byte
+	respNonce       []byte
+	randomPrivKey   *ecies.PrivateKey
+	remoteRandomPub *ecies.PublicKey
+
+	// Add these two fields for Kyber
+	kyberPubKey  kem.PublicKey
+	kyberPrivKey kem.PrivateKey
+}
+
+// Update the encHandshake  struct with kyber
+type encHandshakeKyber struct {
 	initiator            bool
-	remote               *ecies.PublicKey  // remote-pubk
-	initNonce, respNonce []byte            // nonce
-	randomPrivKey        *ecies.PrivateKey // ecdhe-random
-	remoteRandomPub      *ecies.PublicKey  // ecdhe-random-pubk
+	kyberPubKey          kyber768.PublicKey  // Kyber public key
+	kyberPrivKey         kyber768.PrivateKey // Kyber private key
+	initNonce, respNonce []byte              // Nonces
+	kyberRemotePubKey    kyber768.PublicKey  // Remote's Kyber public key
 }
 
 // RLPx v4 handshake auth (defined in EIP-8).
@@ -374,34 +420,74 @@ type authRespV4 struct {
 // it should be called on the listening side of the connection.
 //
 // prv is the local client's private key.
-func receiverEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey) (s Secrets, err error) {
-	authMsg := new(authMsgV4)
-	authPacket, err := readHandshakeMsg(authMsg, encAuthMsgLen, prv, conn)
+// func receiverEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey) (s Secrets, err error) {
+// 	authMsg := new(authMsgV4)
+// 	authPacket, err := readHandshakeMsg(authMsg, encAuthMsgLen, prv, conn)
+// 	if err != nil {
+// 		return s, err
+// 	}
+// 	h := new(encHandshake)
+// 	if err := h.handleAuthMsg(authMsg, prv); err != nil {
+// 		return s, err
+// 	}
+
+// 	authRespMsg, err := h.makeAuthResp()
+// 	if err != nil {
+// 		return s, err
+// 	}
+// 	var authRespPacket []byte
+// 	if authMsg.gotPlain {
+// 		authRespPacket, err = authRespMsg.sealPlain(h)
+// 	} else {
+// 		authRespPacket, err = sealEIP8(authRespMsg, h)
+// 	}
+// 	if err != nil {
+// 		return s, err
+// 	}
+// 	if _, err = conn.Write(authRespPacket); err != nil {
+// 		return s, err
+// 	}
+// 	return h.secrets(authPacket, authRespPacket)
+// }
+
+// update the receiverEncHandshake with kyber
+func receiverEncHandshake(conn io.ReadWriter, prv *mldsa87.PrivateKey) (s Secrets, err error) {
+	h := &encHandshakeKyber{}
+
+	// Step 1: Generate receiver's Kyber key pair
+	kyberScheme := kyber768.Scheme()
+	receiverKyberPubKey, receiverKyberPrivKey, err := kyberScheme.GenerateKeyPair()
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to generate receiver's Kyber key pair: %v", err)
 	}
-	h := new(encHandshake)
-	if err := h.handleAuthMsg(authMsg, prv); err != nil {
-		return s, err
+	h.kyberPubKey = *receiverKyberPubKey.(*kyber768.PublicKey)
+	h.kyberPrivKey = *receiverKyberPrivKey.(*kyber768.PrivateKey)
+
+	// Step 2: Read the Kyber ciphertext from the initiator
+	ciphertext := make([]byte, kyber768.Scheme().CiphertextSize())
+	if _, err := io.ReadFull(conn, ciphertext); err != nil {
+		return s, fmt.Errorf("failed to read Kyber ciphertext: %v", err)
 	}
 
-	authRespMsg, err := h.makeAuthResp()
+	// Step 3: Decapsulate the shared secret
+	sharedSecret, err := kyberScheme.Decapsulate(&h.kyberPrivKey, ciphertext)
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to decapsulate shared secret: %v", err)
 	}
-	var authRespPacket []byte
-	if authMsg.gotPlain {
-		authRespPacket, err = authRespMsg.sealPlain(h)
-	} else {
-		authRespPacket, err = sealEIP8(authRespMsg, h)
-	}
+
+	// Step 4: Marshal receiver's Kyber public key to bytes
+	pubKeyBytes, err := h.kyberPubKey.MarshalBinary()
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to marshal Kyber public key: %v", err)
 	}
-	if _, err = conn.Write(authRespPacket); err != nil {
-		return s, err
+
+	// Step 5: Send back acknowledgment (receiver's public key)
+	if _, err = conn.Write(pubKeyBytes); err != nil {
+		return s, fmt.Errorf("failed to send acknowledgment message: %v", err)
 	}
-	return h.secrets(authPacket, authRespPacket)
+
+	// Step 6: Derive AES and MAC secrets from shared secret
+	return deriveKyberSecrets(sharedSecret, pubKeyBytes), nil
 }
 
 func (h *encHandshake) handleAuthMsg(msg *authMsgV4, prv *ecdsa.PrivateKey) error {
@@ -479,30 +565,121 @@ func (h *encHandshake) staticSharedSecret(prv *ecdsa.PrivateKey) ([]byte, error)
 // it should be called on the dialing side of the connection.
 //
 // prv is the local client's private key.
-func initiatorEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, remote *ecdsa.PublicKey) (s Secrets, err error) {
-	h := &encHandshake{initiator: true, remote: ecies.ImportECDSAPublic(remote)}
-	authMsg, err := h.makeAuthMsg(prv)
+// func initiatorEncHandshake(conn io.ReadWriter, prv *ecdsa.PrivateKey, remote *ecdsa.PublicKey) (s Secrets, err error) {
+// 	h := &encHandshake{initiator: true, remote: ecies.ImportECDSAPublic(remote)}
+// 	authMsg, err := h.makeAuthMsg(prv)
+// 	if err != nil {
+// 		return s, err
+// 	}
+// 	authPacket, err := sealEIP8(authMsg, h)
+// 	if err != nil {
+// 		return s, err
+// 	}
+
+// 	if _, err = conn.Write(authPacket); err != nil {
+// 		return s, err
+// 	}
+
+// 	authRespMsg := new(authRespV4)
+// 	authRespPacket, err := readHandshakeMsg(authRespMsg, encAuthRespLen, prv, conn)
+// 	if err != nil {
+// 		return s, err
+// 	}
+// 	if err := h.handleAuthResp(authRespMsg); err != nil {
+// 		return s, err
+// 	}
+// 	return h.secrets(authPacket, authRespPacket)
+// }
+
+// Update initiatorEncHandshake with kyber  change from *ecdsa.PrivateKey to *mldsa87.PrivateKey and *ecdsa.PublicKey  to
+func initiatorEncHandshake(conn io.ReadWriter, prv *mldsa87.PrivateKey, remote *mldsa87.PublicKey) (s Secrets, err error) {
+	h := &encHandshake{initiator: true}
+
+	// Step 1: Generate Kyber key pair
+	kyberScheme := kyber768.Scheme()
+	kyberPub, kyberPriv, err := kyberScheme.GenerateKeyPair()
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to generate Kyber key pair: %v", err)
 	}
-	authPacket, err := sealEIP8(authMsg, h)
+	h.kyberPubKey, h.kyberPrivKey = kyberPub, kyberPriv
+
+	// Step 2: Sign and encapsulate the message
+	message := []byte("Black brown Fox Go For Hunting.")
+	ciphertext, sharedSecret, _, err := EncapsulateSignedMessage(h.kyberPubKey.(*kyber768.PublicKey), message, prv)
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to encapsulate shared secret: %v", err)
 	}
 
-	if _, err = conn.Write(authPacket); err != nil {
-		return s, err
+	// Step 3: Send the Kyber ciphertext
+	if _, err = conn.Write(ciphertext); err != nil {
+		return s, fmt.Errorf("failed to send Kyber ciphertext: %v", err)
 	}
 
-	authRespMsg := new(authRespV4)
-	authRespPacket, err := readHandshakeMsg(authRespMsg, encAuthRespLen, prv, conn)
+	// Step 4: Marshal Kyber public key to bytes
+	pubKeyBytes, err := h.kyberPubKey.(*kyber768.PublicKey).MarshalBinary()
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf("failed to marshal Kyber public key: %v", err)
 	}
-	if err := h.handleAuthResp(authRespMsg); err != nil {
-		return s, err
+
+	// Step 5: Derive AES and MAC secrets from shared secret and public key bytes
+	return deriveKyberSecrets(sharedSecret, pubKeyBytes), nil
+}
+
+func EncapsulateSignedMessage(kyberPubKey *kyber768.PublicKey, message []byte, privKey *mldsa87.PrivateKey) ([]byte, []byte, []byte, error) {
+	// Step 1: Sign the message
+	signature, err := privKey.Sign(rand.Reader, message, crypto.Hash(0))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to sign message: %v", err)
 	}
-	return h.secrets(authPacket, authRespPacket)
+	payload := append(message, signature...)
+
+	// Step 2: Encapsulate the symmetric key using Kyber
+	kyberScheme := kyber768.Scheme()
+	ciphertext, sharedSecret, err := kyberScheme.Encapsulate(kyberPubKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to encapsulate key: %v", err)
+	}
+
+	// Step 3: Encrypt the payload using AES-GCM with the Kyber shared secret
+	aesKey := sha512.Sum512(sharedSecret)
+	encryptedPayload, nonce, err := EncryptPayload(aesKey[:], payload)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to encrypt payload: %v", err)
+	}
+
+	return ciphertext, encryptedPayload, nonce, nil
+}
+
+// EncryptPayload encrypts the given data using AES-GCM.
+func EncryptPayload(key, payload []byte) ([]byte, []byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create AES cipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create GCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate nonce: %v", err)
+	}
+	ciphertext := gcm.Seal(nil, nonce, payload, nil)
+	return ciphertext, nonce, nil
+}
+func deriveKyberSecrets(sharedSecret []byte, pubKeyBytes []byte) Secrets {
+	// Derive AES key from shared secret
+	aesKey := sha512.Sum512(sharedSecret)
+
+	// Derive MAC key by appending public key bytes
+	macKey := sha512.Sum512(append(aesKey[:], pubKeyBytes...))
+
+	return Secrets{
+		AES:        aesKey[:],
+		MAC:        macKey[:],
+		EgressMAC:  sha3.NewLegacyKeccak256(),
+		IngressMAC: sha3.NewLegacyKeccak256(),
+	}
 }
 
 // makeAuthMsg creates the initiator handshake message.
